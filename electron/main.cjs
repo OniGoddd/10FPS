@@ -185,7 +185,7 @@ const registerIpc = () => {
     // Never give a navigated or embedded renderer access to filesystem IPC.
     let origin;
     try { origin = new URL(event.senderFrame?.url ?? '').origin; } catch { origin = null; }
-    if (!event.senderFrame || origin !== serverOrigin || event.sender !== event.senderFrame.top?.webContents) {
+    if (!event.senderFrame || origin !== serverOrigin || event.senderFrame !== event.sender.mainFrame) {
       throw new Error('Untrusted renderer IPC request.');
     }
     return fn(event, ...args);
