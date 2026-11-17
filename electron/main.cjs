@@ -181,7 +181,16 @@ const pickAudioForJob = async (jobId) => {
 };
 
 const registerIpc = () => {
-  ipcMain.handle('frame-runner:pick-zip', async () => {
+  const trustedHandle = (channel, fn) => ipcMain.handle(channel, (event, ...args) => {
+    // Never give a navigated or embedded renderer access to filesystem IPC.
+    let origin;
+    try { origin = new URL(event.senderFrame?.url ?? '').origin; } catch { origin = null; }
+    if (!event.senderFrame || origin !== serverOrigin || event.sender !== event.senderFrame.top?.webContents) {
+      throw new Error('Untrusted renderer IPC request.');
+    }
+    return fn(event, ...args);
+  });
+  trustedHandle('frame-runner:pick-zip', async () => {
     const result = await dialog.showOpenDialog({
       title: 'Choose image ZIP',
       properties: ['openFile'],
@@ -195,7 +204,7 @@ const registerIpc = () => {
     }
   });
 
-  ipcMain.handle('frame-runner:pick-audio', async (_event, jobId) => {
+  trustedHandle('frame-runner:pick-audio', async (_event, jobId) => {
     if (typeof jobId !== 'string') throw new Error('Invalid image job.');
     try {
       return await pickAudioForJob(jobId);
@@ -204,19 +213,19 @@ const registerIpc = () => {
     }
   });
 
-  ipcMain.handle('frame-runner:clear-audio', async (_event, jobId) => {
+  trustedHandle('frame-runner:clear-audio', async (_event, jobId) => {
     if (typeof jobId !== 'string') return;
     const job = jobs.get(jobId);
     if (!job) return;
     await rm(path.join(job.dir, 'audio'), {recursive: true, force: true});
   });
 
-  ipcMain.handle('frame-runner:release-job', async (_event, jobId) => {
+  trustedHandle('frame-runner:release-job', async (_event, jobId) => {
     if (typeof jobId !== 'string') return;
     await cleanupJob(jobId);
   });
 
-  ipcMain.handle('frame-runner:begin-save', async (_event, suggestedName) => {
+  trustedHandle('frame-runner:begin-save', async (_event, suggestedName) => {
     const safeName = path.basename(typeof suggestedName === 'string' ? suggestedName : 'image-sequence.mp4');
     const filename = safeName.toLowerCase().endsWith('.mp4') ? safeName : `${safeName}.mp4`;
     const result = await dialog.showSaveDialog({
@@ -232,7 +241,7 @@ const registerIpc = () => {
     return {cancelled: false, saveId, path: result.filePath};
   });
 
-  ipcMain.handle('frame-runner:write-chunk', async (_event, payload) => {
+  trustedHandle('frame-runner:write-chunk', async (_event, payload) => {
     const save = saves.get(payload?.saveId);
     if (!save) throw new Error('The output file is no longer available.');
     const position = Number(payload?.position);
@@ -241,14 +250,14 @@ const registerIpc = () => {
     await save.fileHandle.write(bytes, 0, bytes.length, position);
   });
 
-  ipcMain.handle('frame-runner:finish-save', async (_event, saveId) => {
+  trustedHandle('frame-runner:finish-save', async (_event, saveId) => {
     const save = saves.get(saveId);
     if (!save) return;
     saves.delete(saveId);
     await save.fileHandle.close();
   });
 
-  ipcMain.handle('frame-runner:cancel-save', async (_event, saveId) => {
+  trustedHandle('frame-runner:cancel-save', async (_event, saveId) => {
     const save = saves.get(saveId);
     if (!save) return;
     saves.delete(saveId);
@@ -273,10 +282,15 @@ const createWindow = async () => {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
     },
   });
 
+  // Keep the app on the trusted local UI; external navigation cannot gain IPC access.
+  window.webContents.on('will-navigate', (event, url) => {
+    if (!url.startsWith(serverOrigin + '/')) event.preventDefault();
+  });
+  window.webContents.setWindowOpenHandler(() => ({action: 'deny'}));
   window.once('ready-to-show', () => window.show());
   await window.loadURL(serverOrigin);
 };
